@@ -1,17 +1,33 @@
 const API_BASE = '/api';
 
+async function handleResponse(res, defaultMsg = 'Request failed') {
+  if (!res.ok) {
+    let errMsg = defaultMsg;
+    try {
+      const data = await res.json();
+      if (data && data.error) errMsg = data.error;
+      else if (data && data.message) errMsg = data.message;
+    } catch (e) {
+      try {
+        const text = await res.text();
+        if (text) errMsg = text;
+      } catch (err) {}
+    }
+    throw new Error(errMsg);
+  }
+  return res.json();
+}
+
 export const api = {
   // Folders
   getFolders: async () => {
     const res = await fetch(`${API_BASE}/folders`);
-    if (!res.ok) throw new Error('Failed to fetch folders');
-    return res.json();
+    return handleResponse(res, 'Failed to fetch folders');
   },
 
   getFolder: async (id) => {
     const res = await fetch(`${API_BASE}/folders/${id}`);
-    if (!res.ok) throw new Error('Failed to fetch folder details');
-    return res.json();
+    return handleResponse(res, 'Failed to fetch folder details');
   },
 
   createFolder: async (folderData) => {
@@ -20,8 +36,7 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(folderData)
     });
-    if (!res.ok) throw new Error('Failed to create folder');
-    return res.json();
+    return handleResponse(res, 'Failed to create folder');
   },
 
   updateFolder: async (id, folderData) => {
@@ -30,16 +45,14 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(folderData)
     });
-    if (!res.ok) throw new Error('Failed to update folder');
-    return res.json();
+    return handleResponse(res, 'Failed to update folder');
   },
 
   deleteFolder: async (id, deleteReceipts = false) => {
     const res = await fetch(`${API_BASE}/folders/${id}?delete_receipts=${deleteReceipts}`, {
       method: 'DELETE'
     });
-    if (!res.ok) throw new Error('Failed to delete folder');
-    return res.json();
+    return handleResponse(res, 'Failed to delete folder');
   },
 
   // Receipts
@@ -51,14 +64,12 @@ export const api = {
     if (filters.status) params.append('status', filters.status);
 
     const res = await fetch(`${API_BASE}/receipts?${params.toString()}`);
-    if (!res.ok) throw new Error('Failed to fetch receipts');
-    return res.json();
+    return handleResponse(res, 'Failed to fetch receipts');
   },
 
   getReceipt: async (id) => {
     const res = await fetch(`${API_BASE}/receipts/${id}`);
-    if (!res.ok) throw new Error('Failed to fetch receipt');
-    return res.json();
+    return handleResponse(res, 'Failed to fetch receipt');
   },
 
   createReceipt: async (receiptData) => {
@@ -67,8 +78,7 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(receiptData)
     });
-    if (!res.ok) throw new Error('Failed to create receipt');
-    return res.json();
+    return handleResponse(res, 'Failed to create receipt');
   },
 
   updateReceipt: async (id, receiptData) => {
@@ -77,16 +87,14 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(receiptData)
     });
-    if (!res.ok) throw new Error('Failed to update receipt');
-    return res.json();
+    return handleResponse(res, 'Failed to update receipt');
   },
 
   deleteReceipt: async (id) => {
     const res = await fetch(`${API_BASE}/receipts/${id}`, {
       method: 'DELETE'
     });
-    if (!res.ok) throw new Error('Failed to delete receipt');
-    return res.json();
+    return handleResponse(res, 'Failed to delete receipt');
   },
 
   batchMoveReceipts: async (receiptIds, targetFolderId) => {
@@ -95,8 +103,7 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ receipt_ids: receiptIds, target_folder_id: targetFolderId })
     });
-    if (!res.ok) throw new Error('Failed to move receipts');
-    return res.json();
+    return handleResponse(res, 'Failed to move receipts');
   },
 
   batchDeleteReceipts: async (receiptIds) => {
@@ -105,23 +112,20 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ receipt_ids: receiptIds })
     });
-    if (!res.ok) throw new Error('Failed to batch delete receipts');
-    return res.json();
+    return handleResponse(res, 'Failed to batch delete receipts');
   },
 
   autoFileByDate: async () => {
     const res = await fetch(`${API_BASE}/receipts/auto-file-by-date`, {
       method: 'POST'
     });
-    if (!res.ok) throw new Error('Failed to auto-file receipts');
-    return res.json();
+    return handleResponse(res, 'Failed to auto-file receipts');
   },
 
   // Scanners & Ingestion
   getScanners: async () => {
     const res = await fetch(`${API_BASE}/scanners`);
-    if (!res.ok) throw new Error('Failed to detect scanners');
-    return res.json();
+    return handleResponse(res, 'Failed to detect scanners');
   },
 
   triggerScan: async ({ target_folder_id = null, source = 'auto', template_index = null } = {}) => {
@@ -130,8 +134,7 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ target_folder_id, source, template_index })
     });
-    if (!res.ok) throw new Error('Failed to trigger scan');
-    return res.json();
+    return handleResponse(res, 'Failed to trigger scan');
   },
 
   uploadScan: async (file, target_folder_id = null) => {
@@ -145,16 +148,14 @@ export const api = {
       method: 'POST',
       body: formData
     });
-    if (!res.ok) throw new Error('Failed to upload scan file');
-    return res.json();
+    return handleResponse(res, 'Failed to upload scan file');
   },
 
   reprocessOcr: async (id) => {
     const res = await fetch(`${API_BASE}/receipts/${id}/reprocess-ocr`, {
       method: 'POST'
     });
-    if (!res.ok) throw new Error('Failed to reprocess OCR');
-    return res.json();
+    return handleResponse(res, 'Failed to reprocess OCR');
   },
 
   // Exports
@@ -173,7 +174,6 @@ export const api = {
   // Analytics
   getAnalytics: async () => {
     const res = await fetch(`${API_BASE}/analytics`);
-    if (!res.ok) throw new Error('Failed to fetch analytics');
-    return res.json();
+    return handleResponse(res, 'Failed to fetch analytics');
   }
 };

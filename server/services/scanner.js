@@ -558,8 +558,7 @@ async function handleScanTrigger({ target_folder_id = null, source = 'auto', tem
         status: 'processed'
       };
 
-      dbApi.createReceipt(receipt);
-      return dbApi.getReceiptById(id);
+      return receipt;
     } catch (wiaErr) {
       console.warn('Windows WIA scan attempted, falling back to eSCL / AirScan candidate:', wiaErr.message);
     }

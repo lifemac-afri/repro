@@ -262,7 +262,8 @@ app.post('/api/scan/trigger', async (req, res) => {
       template_index: template_index !== undefined ? template_index : null
     });
 
-    const savedReceipt = dbApi.createReceipt(scannedData);
+    const existing = (scannedData && scannedData.id) ? dbApi.getReceiptById(scannedData.id) : null;
+    const savedReceipt = existing || dbApi.createReceipt(scannedData);
     res.status(201).json(savedReceipt);
   } catch (error) {
     console.error('Scan trigger error:', error);
