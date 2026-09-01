@@ -322,15 +322,24 @@ try {
  */
 async function performRealPhysicalScan(scannerInfo, targetFolderId = null) {
   const candidateHosts = Array.from(new Set([
+    customScannerConfig.host,
     process.env.SCANNER_HOST,
     process.env.PRINTER_IP,
-    'host.docker.internal',
     scannerInfo?.host,
-    cachedScanner.host,
+    cachedScanner?.host,
+    'host.docker.internal',
     '127.0.0.1'
   ].filter(Boolean)));
 
-  const port = parseInt(process.env.SCANNER_PORT) || scannerInfo?.port || cachedScanner.port || 56200;
+  const candidatePorts = Array.from(new Set([
+    customScannerConfig.port,
+    scannerInfo?.port,
+    cachedScanner?.port,
+    parseInt(process.env.SCANNER_PORT),
+    8080,
+    80,
+    56200
+  ].filter(Boolean)));
 
   const xmlPayload = `<?xml version="1.0" encoding="UTF-8"?>
 <scan:ScanSettings xmlns:scan="http://schemas.hp.com/imaging/escl/2011/05/03" xmlns:pwg="http://www.pwg.org/schemas/2010/12/sm">
@@ -350,53 +359,59 @@ async function performRealPhysicalScan(scannerInfo, targetFolderId = null) {
   <pwg:DocumentFormat>image/jpeg</pwg:DocumentFormat>
 </scan:ScanSettings>`;
 
-  // 1. Create Scan Job by probing candidate hosts (supports Docker, host bridge, & LAN)
-  let activeHost = candidateHosts[0];
+  // 1. Create Scan Job by probing candidate hosts and ports
+  let activeHost = candidateHosts[0] || '127.0.0.1';
+  let activePort = candidatePorts[0] || 8080;
   let jobLocation = null;
   let lastError = null;
 
   for (const host of candidateHosts) {
-    try {
-      jobLocation = await new Promise((resolve, reject) => {
-        const req = http.request({
-          hostname: host,
-          port: port,
-          path: '/eSCL/ScanJobs',
-          method: 'POST',
-          headers: {
-            'Content-Type': 'text/xml',
-            'Content-Length': Buffer.byteLength(xmlPayload)
-          },
-          timeout: 4000
-        }, (res) => {
-          if (res.statusCode === 201 && res.headers.location) {
-            resolve(res.headers.location);
-          } else {
-            reject(new Error(`Printer on ${host}:${port} returned HTTP ${res.statusCode}`));
-          }
+    for (const port of candidatePorts) {
+      try {
+        jobLocation = await new Promise((resolve, reject) => {
+          const req = http.request({
+            hostname: host,
+            port: port,
+            path: '/eSCL/ScanJobs',
+            method: 'POST',
+            headers: {
+              'Content-Type': 'text/xml',
+              'Content-Length': Buffer.byteLength(xmlPayload)
+            },
+            timeout: 2500
+          }, (res) => {
+            if (res.statusCode === 201 && res.headers.location) {
+              resolve(res.headers.location);
+            } else {
+              reject(new Error(`Printer on ${host}:${port} returned HTTP ${res.statusCode}`));
+            }
+          });
+
+          req.on('error', reject);
+          req.on('timeout', () => { req.destroy(); reject(new Error(`Timeout connecting to ${host}:${port}`)); });
+          req.write(xmlPayload);
+          req.end();
         });
 
-        req.on('error', reject);
-        req.on('timeout', () => { req.destroy(); reject(new Error(`Timeout connecting to ${host}:${port}`)); });
-        req.write(xmlPayload);
-        req.end();
-      });
-
-      if (jobLocation) {
-        activeHost = host;
-        console.log(`✓ Connected to scanner on active host: ${activeHost}:${port}`);
-        break;
+        if (jobLocation) {
+          activeHost = host;
+          activePort = port;
+          console.log(`✓ Connected to scanner on active endpoint: ${activeHost}:${activePort}`);
+          break;
+        }
+      } catch (err) {
+        lastError = err;
       }
-    } catch (err) {
-      lastError = err;
     }
+    if (jobLocation) break;
   }
 
   if (!jobLocation) {
-    throw new Error(`Could not connect to printer scanner on any host (${candidateHosts.join(', ')}:${port}). ${lastError ? lastError.message : ''}`);
+    throw new Error(`Could not connect to printer scanner on (${candidateHosts.join(', ')}). ${lastError ? lastError.message : ''}`);
   }
 
   const host = activeHost;
+  const port = activePort;
 
   // Extract relative job path
   let jobPath = jobLocation;
@@ -430,25 +445,28 @@ async function performRealPhysicalScan(scannerInfo, targetFolderId = null) {
               fileStream.on('error', reject);
             } else if (res.statusCode === 503) {
               // Scanner is busy scanning or warming up
-              res.resume();
-              resolve(false);
+              setTimeout(() => resolve(false), 800);
             } else {
-              res.resume();
-              reject(new Error(`Printer returned HTTP ${res.statusCode}`));
+              reject(new Error(`HTTP ${res.statusCode} retrieving scan image from ${host}:${port}`));
             }
           });
 
-          req.on('error', (e) => resolve(false));
-          req.on('timeout', () => { req.destroy(); resolve(false); });
+          req.on('error', (e) => {
+            setTimeout(() => resolve(false), 800);
+          });
+          req.on('timeout', () => {
+            req.destroy();
+            setTimeout(() => resolve(false), 800);
+          });
         });
 
         if (success && fs.existsSync(filePath) && fs.statSync(filePath).size > 0) {
           return true;
         }
-      } catch (err) {
-        if (attempt === maxRetries) throw err;
+      } catch (e) {
+        // Retry
       }
-      await new Promise(r => setTimeout(r, 1000));
+      await new Promise(r => setTimeout(r, 600));
     }
     throw new Error('Scanner hardware timed out while completing scan');
   };
