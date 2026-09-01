@@ -621,19 +621,6 @@ async function detectSystemScanners() {
   return devices;
 }
 
-module.exports = {
-  detectSystemScanners,
-  discoverPhysicalScanners,
-  probeScannerEndpoint,
-  setCustomScannerEndpoint,
-  getCustomScannerConfig,
-  handleScanTrigger,
-  triggerMockScan,
-  performRealPhysicalScan,
-  processUploadedScan,
-  SAMPLE_TEMPLATES
-};
-
 /**
  * Handle scan trigger (Routes to real printer on Windows/macOS or simulator)
  */
@@ -739,6 +726,10 @@ async function processUploadedScan(file, targetFolderId = null) {
 
 module.exports = {
   detectSystemScanners,
+  discoverPhysicalScanners,
+  probeScannerEndpoint,
+  setCustomScannerEndpoint,
+  getCustomScannerConfig,
   handleScanTrigger,
   triggerMockScan,
   performRealPhysicalScan,
