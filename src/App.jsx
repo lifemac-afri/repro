@@ -195,6 +195,11 @@ export default function App() {
         )}
       </main>
 
+      {/* Footer */}
+      <footer className="mt-auto py-5 border-t border-slate-200 bg-white text-center text-xs font-medium text-slate-500">
+        <p>Product of <span className="font-semibold text-slate-800">LIFEMAC Africa</span></p>
+      </footer>
+
       {/* Scanner Trigger Dialog */}
       <ScannerModal
         isOpen={isScannerOpen}
