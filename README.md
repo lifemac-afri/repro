@@ -16,22 +16,54 @@ RePro is a local-first, full-stack office receipt scanning and expense processin
 
 ---
 
-## Local Development
+## Windows Direct Setup (Zero Docker Required)
+
+You do **not** need Docker to run RePro on Windows.
+
+### Method 1: Double-Click Launcher (Easiest)
+1. Ensure [Node.js](https://nodejs.org/) (version 18+ or LTS) is installed on your Windows PC.
+2. Double-click **`start-windows.bat`**.
+3. It will automatically install dependencies, build the frontend, start the server at `http://localhost:3001`, and open RePro in your web browser!
+
+### Method 2: Command Line (PowerShell / Command Prompt)
+```cmd
+# 1. Install dependencies
+npm install
+
+# 2. Build the frontend
+npm run build
+
+# 3. Start the application
+npm start
+```
+Then open `http://localhost:3001` in your browser.
+
+---
+
+## Windows Physical Printer & Scanner Integration
+
+On Windows, RePro connects directly to your office scanners (e.g. **HP Laser MFP 135w** or any USB / Wi-Fi scanner) through:
+- **Windows Image Acquisition (WIA)**: Native driver built into Windows (no third-party software needed).
+- **eSCL / AirScan**: Over local Wi-Fi / Ethernet.
+
+---
+
+## Local Development (macOS / Linux / Windows)
 
 ```bash
 # Install dependencies
 npm install
 
-# Start both backend server and frontend client
+# Start development mode (with hot reload)
 npm run dev
 ```
 
-- Web UI: `http://localhost:5174` (or `http://localhost:5173`)
+- Development Web UI: `http://localhost:5173` (or `http://localhost:5174`)
 - API Server: `http://localhost:3001`
 
 ---
 
-## Docker & Coolify Deployment
+## Docker & Coolify Deployment (Optional for Servers)
 
 ### Standalone Docker
 ```bash
@@ -48,3 +80,4 @@ docker compose up -d --build
    ```
 5. Set the healthcheck endpoint to `/health`.
 6. Deploy!
+

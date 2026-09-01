@@ -84,15 +84,52 @@ const SAMPLE_TEMPLATES = [
 
 let cachedScanner = {
   name: 'HP Laser MFP 135w',
-  host: '127.0.0.1',
-  port: 56200,
+  type: 'auto',
+  host: process.env.SCANNER_HOST || '127.0.0.1',
+  port: parseInt(process.env.SCANNER_PORT) || 56200,
   lastChecked: Date.now()
 };
 
 /**
- * Discover AirScan / eSCL scanners on macOS via mDNS
+ * Discover Physical Scanners (Cross-platform: Windows WIA / macOS eSCL / Network eSCL)
  */
 function discoverPhysicalScanners() {
+  if (process.platform === 'win32') {
+    return new Promise((resolve) => {
+      const psCheck = `
+        $dm = New-Object -ComObject WIA.DeviceManager;
+        foreach ($d in $dm.DeviceInfos) {
+          if ($d.Type -eq 1) {
+            Write-Output $d.Properties.Item('Name').Value;
+            break;
+          }
+        }
+      `;
+      exec(`powershell -NoProfile -Command "${psCheck.replace(/\n/g, ' ')}"`, { timeout: 3000 }, (err, stdout) => {
+        const scannerName = stdout ? stdout.trim() : '';
+        if (scannerName) {
+          cachedScanner = {
+            name: scannerName,
+            type: 'wia',
+            host: process.env.SCANNER_HOST || '127.0.0.1',
+            port: parseInt(process.env.SCANNER_PORT) || 56200,
+            lastChecked: Date.now()
+          };
+        } else {
+          cachedScanner = {
+            name: process.env.SCANNER_NAME || 'HP Laser MFP 135w',
+            type: 'escl',
+            host: process.env.SCANNER_HOST || '127.0.0.1',
+            port: parseInt(process.env.SCANNER_PORT) || 56200,
+            lastChecked: Date.now()
+          };
+        }
+        resolve(cachedScanner);
+      });
+    });
+  }
+
+  // macOS / Linux AirScan discovery via dns-sd
   return new Promise((resolve) => {
     try {
       const child = exec('dns-sd -B _uscan._tcp local.');
@@ -118,7 +155,7 @@ function discoverPhysicalScanners() {
               try { resChild.kill(); } catch (e) {}
               const host = portMatch[1].replace(/\.$/, '') === 'localhost' ? '127.0.0.1' : portMatch[1].replace(/\.$/, '');
               const port = parseInt(portMatch[2]);
-              cachedScanner = { name: rawName, host, port, lastChecked: Date.now() };
+              cachedScanner = { name: rawName, type: 'escl', host, port, lastChecked: Date.now() };
               resolve(cachedScanner);
             }
           });
@@ -137,6 +174,54 @@ function discoverPhysicalScanners() {
     } catch (e) {
       resolve(cachedScanner);
     }
+  });
+}
+
+/**
+ * Perform a physical scan on Windows via native Windows Image Acquisition (WIA)
+ */
+function performWindowsWiaScan(outputPath) {
+  return new Promise((resolve, reject) => {
+    const psScript = `
+$ErrorActionPreference = 'Stop'
+try {
+  $dm = New-Object -ComObject WIA.DeviceManager
+  $scanner = $null
+  foreach ($d in $dm.DeviceInfos) {
+    if ($d.Type -eq 1) {
+      $scanner = $d
+      break
+    }
+  }
+  if (-not $scanner) {
+    Write-Error "No WIA scanner device found"
+    exit 1
+  }
+  $device = $scanner.Connect()
+  $item = $device.Items.Item(1)
+  $dialog = New-Object -ComObject WIA.CommonDialog
+  $image = $dialog.ShowTransfer($item, "{B96B3CAE-0728-11D3-9D7B-0000F81EF32E}", $false)
+  if ($image) {
+    $out = "${outputPath.replace(/\\/g, '\\\\')}"
+    if (Test-Path $out) { Remove-Item $out -Force }
+    $image.SaveFile($out)
+    Write-Output "SUCCESS"
+  } else {
+    Write-Error "Scan transfer was cancelled or produced no image"
+    exit 1
+  }
+} catch {
+  Write-Error $_.Exception.Message
+  exit 1
+}
+`;
+    exec(`powershell -NoProfile -ExecutionPolicy Bypass -Command "${psScript.replace(/\n/g, ' ')}"`, { timeout: 45000 }, (err, stdout, stderr) => {
+      if (err || !fs.existsSync(outputPath) || fs.statSync(outputPath).size === 0) {
+        reject(new Error(stderr || err?.message || 'Windows WIA scan failed'));
+      } else {
+        resolve(outputPath);
+      }
+    });
   });
 }
 
@@ -432,14 +517,55 @@ async function detectSystemScanners() {
 }
 
 /**
- * Handle scan trigger (Routes to real printer or simulator)
+ * Handle scan trigger (Routes to real printer on Windows/macOS or simulator)
  */
 async function handleScanTrigger({ target_folder_id = null, source = 'auto', template_index = null }) {
   if (source === 'simulator' || source === 'mock_scanner') {
     return triggerMockScan(target_folder_id, template_index);
   }
 
-  // Attempt real physical scan
+  // 1. If on Windows, try native Windows Image Acquisition (WIA) first
+  if (process.platform === 'win32') {
+    try {
+      const id = uuidv4();
+      const fileName = `scan_${Date.now()}_${id.slice(0, 8)}.jpg`;
+      const filePath = path.join(uploadsDir, fileName);
+
+      console.log('📡 Triggering Windows WIA hardware scan...');
+      await performWindowsWiaScan(filePath);
+
+      const stats = fs.statSync(filePath);
+      const ocrResult = await processImageOcr(filePath);
+      const metadata = parseReceiptText(ocrResult.text || '');
+
+      const receipt = {
+        id,
+        folder_id: target_folder_id || null,
+        title: metadata.merchant && metadata.merchant !== 'Unknown Merchant' ? `${metadata.merchant} - ${metadata.date}` : 'Scanned Receipt',
+        merchant: metadata.merchant || 'Scanned Document',
+        amount: metadata.amount || 0.0,
+        currency: 'USD',
+        tax_amount: metadata.tax_amount || 0.0,
+        receipt_date: metadata.date || new Date().toISOString().slice(0, 10),
+        category: metadata.category || 'General Expense',
+        payment_method: metadata.payment_method || 'Unknown',
+        notes: `Scanned from Windows WIA Printer Scanner`,
+        file_path: filePath,
+        file_name: fileName,
+        file_size: stats.size,
+        mime_type: 'image/jpeg',
+        ocr_raw_text: ocrResult.text || '',
+        status: 'processed'
+      };
+
+      dbApi.createReceipt(receipt);
+      return dbApi.getReceiptById(id);
+    } catch (wiaErr) {
+      console.warn('Windows WIA scan attempted, falling back to eSCL / AirScan candidate:', wiaErr.message);
+    }
+  }
+
+  // 2. Attempt real physical scan via eSCL / AirScan protocol
   try {
     const scannerInfo = await discoverPhysicalScanners();
     if (scannerInfo) {
