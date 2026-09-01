@@ -6,7 +6,16 @@ const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 
 const { dbApi, uploadsDir } = require('./db/database');
-const { detectSystemScanners, handleScanTrigger, triggerMockScan, processUploadedScan, SAMPLE_TEMPLATES } = require('./services/scanner');
+const { 
+  detectSystemScanners, 
+  handleScanTrigger, 
+  triggerMockScan, 
+  processUploadedScan, 
+  probeScannerEndpoint,
+  setCustomScannerEndpoint,
+  getCustomScannerConfig,
+  SAMPLE_TEMPLATES 
+} = require('./services/scanner');
 const { processImageOcr, parseReceiptText } = require('./services/ocr');
 const { exportFolderZip, exportAllZip } = require('./services/exporter');
 
@@ -246,6 +255,30 @@ app.get('/api/scanners', async (req, res) => {
   try {
     const scanners = await detectSystemScanners();
     res.json(scanners);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Probe a specific scanner IP/host and port
+app.post('/api/scanners/probe', async (req, res) => {
+  try {
+    const { host, port } = req.body;
+    if (!host) return res.status(400).json({ error: 'Host IP/name is required' });
+    const result = await probeScannerEndpoint(host.trim(), port ? parseInt(port) : 8080);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Configure target scanner IP
+app.post('/api/scanners/set-target', async (req, res) => {
+  try {
+    const { host, port, name } = req.body;
+    setCustomScannerEndpoint({ host, port, name });
+    const probeResult = host ? await probeScannerEndpoint(host.trim(), port ? parseInt(port) : 8080) : { reachable: false };
+    res.json({ success: true, config: getCustomScannerConfig(), probe: probeResult });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

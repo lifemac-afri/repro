@@ -128,6 +128,24 @@ export const api = {
     return handleResponse(res, 'Failed to detect scanners');
   },
 
+  probeScanner: async (host, port = 8080) => {
+    const res = await fetch(`${API_BASE}/scanners/probe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host, port })
+    });
+    return handleResponse(res, 'Failed to probe scanner');
+  },
+
+  setTargetScanner: async ({ host, port, name }) => {
+    const res = await fetch(`${API_BASE}/scanners/set-target`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host, port, name })
+    });
+    return handleResponse(res, 'Failed to configure scanner');
+  },
+
   triggerScan: async ({ target_folder_id = null, source = 'auto', template_index = null } = {}) => {
     const res = await fetch(`${API_BASE}/scan/trigger`, {
       method: 'POST',

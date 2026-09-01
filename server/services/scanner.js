@@ -82,20 +82,71 @@ const SAMPLE_TEMPLATES = [
   }
 ];
 
-let cachedScanner = {
-  name: 'HP Laser MFP 135w',
-  type: 'auto',
-  host: process.env.SCANNER_HOST || '127.0.0.1',
-  port: parseInt(process.env.SCANNER_PORT) || 56200,
-  lastChecked: Date.now()
+let customScannerConfig = {
+  host: process.env.SCANNER_HOST || null,
+  port: process.env.SCANNER_PORT ? parseInt(process.env.SCANNER_PORT) : null,
+  name: process.env.SCANNER_NAME || null
 };
 
+let cachedScanner = null;
+
 /**
- * Discover Physical Scanners (Cross-platform: Windows WIA / macOS eSCL / Network eSCL)
+ * Actively probe an eSCL endpoint to test if a real scanner responds
  */
-function discoverPhysicalScanners() {
+function probeScannerEndpoint(host, port = 8080) {
+  return new Promise((resolve) => {
+    const req = http.get({
+      hostname: host,
+      port: port,
+      path: '/eSCL/ScannerCapabilities',
+      timeout: 1800
+    }, (res) => {
+      let body = '';
+      res.on('data', d => body += d);
+      res.on('end', () => {
+        if (res.statusCode === 200 && (body.includes('ScannerCapabilities') || body.includes('http://schemas.hp.com') || body.includes('http://www.pwg.org'))) {
+          const makeModelMatch = body.match(/<pwg:MakeAndModel[^>]*>([^<]+)<\/pwg:MakeAndModel>/i);
+          const name = makeModelMatch ? makeModelMatch[1].trim() : `eSCL Scanner (${host}:${port})`;
+          resolve({ reachable: true, name, host, port, type: 'escl' });
+        } else {
+          resolve({ reachable: false, host, port, error: `HTTP ${res.statusCode}` });
+        }
+      });
+    });
+
+    req.on('error', (e) => resolve({ reachable: false, host, port, error: e.message }));
+    req.on('timeout', () => { req.destroy(); resolve({ reachable: false, host, port, error: 'Connection timed out' }); });
+  });
+}
+
+function setCustomScannerEndpoint({ host, port, name }) {
+  customScannerConfig.host = host || null;
+  customScannerConfig.port = port ? parseInt(port) : 8080;
+  if (name) customScannerConfig.name = name;
+  cachedScanner = null;
+}
+
+function getCustomScannerConfig() {
+  return customScannerConfig;
+}
+
+/**
+ * Discover Physical Scanners (Live dynamic probe across candidate hosts and ports)
+ */
+async function discoverPhysicalScanners() {
+  // 1. If user configured a custom scanner IP / host, probe it first
+  if (customScannerConfig.host) {
+    const customPort = customScannerConfig.port || 8080;
+    const probeRes = await probeScannerEndpoint(customScannerConfig.host, customPort);
+    if (probeRes.reachable) {
+      cachedScanner = { ...probeRes, isOnline: true, status: 'Ready (Connected)' };
+      return cachedScanner;
+    }
+  }
+
+  // 2. If on Windows (win32), check native WIA DeviceManager
   if (process.platform === 'win32') {
-    return new Promise((resolve) => {
+    const wiaName = await new Promise((resolve) => {
       const psCheck = `
         $dm = New-Object -ComObject WIA.DeviceManager;
         foreach ($d in $dm.DeviceInfos) {
@@ -106,75 +157,116 @@ function discoverPhysicalScanners() {
         }
       `;
       exec(`powershell -NoProfile -Command "${psCheck.replace(/\n/g, ' ')}"`, { timeout: 3000 }, (err, stdout) => {
-        const scannerName = stdout ? stdout.trim() : '';
-        if (scannerName) {
-          cachedScanner = {
-            name: scannerName,
-            type: 'wia',
-            host: process.env.SCANNER_HOST || '127.0.0.1',
-            port: parseInt(process.env.SCANNER_PORT) || 56200,
-            lastChecked: Date.now()
-          };
-        } else {
-          cachedScanner = {
-            name: process.env.SCANNER_NAME || 'HP Laser MFP 135w',
-            type: 'escl',
-            host: process.env.SCANNER_HOST || '127.0.0.1',
-            port: parseInt(process.env.SCANNER_PORT) || 56200,
-            lastChecked: Date.now()
-          };
-        }
-        resolve(cachedScanner);
+        resolve(stdout ? stdout.trim() : null);
       });
     });
+
+    if (wiaName) {
+      cachedScanner = {
+        name: wiaName,
+        type: 'wia',
+        host: 'localhost',
+        port: 0,
+        isOnline: true,
+        status: 'Ready (Windows WIA)'
+      };
+      return cachedScanner;
+    }
   }
 
-  // macOS / Linux AirScan discovery via dns-sd
-  return new Promise((resolve) => {
-    try {
-      const child = exec('dns-sd -B _uscan._tcp local.');
-      let resolved = false;
+  // 3. Dynamic candidate probes (eSCL across common ports)
+  const candidateTargets = [
+    { host: 'host.docker.internal', port: 56200 },
+    { host: 'host.docker.internal', port: 8080 },
+    { host: 'host.docker.internal', port: 80 },
+    { host: '127.0.0.1', port: 56200 },
+    { host: '127.0.0.1', port: 8080 },
+    { host: '127.0.0.1', port: 80 },
+    { host: 'localhost', port: 56200 },
+    { host: 'localhost', port: 8080 }
+  ];
 
-      const timer = setTimeout(() => {
-        try { child.kill(); } catch (e) {}
-        if (!resolved) resolve(cachedScanner);
-      }, 2000);
+  // Try macOS dns-sd discovery if available
+  if (process.platform === 'darwin') {
+    const mdnsResult = await new Promise((resolve) => {
+      try {
+        const child = exec('dns-sd -B _uscan._tcp local.');
+        let resolved = false;
 
-      child.stdout.on('data', (data) => {
-        const match = data.toString().match(/_uscan\._tcp\.\s+(.+)$/m);
-        if (match && !resolved) {
-          const rawName = match[1].trim();
+        const timer = setTimeout(() => {
           try { child.kill(); } catch (e) {}
+          if (!resolved) resolve(null);
+        }, 1500);
 
-          const resChild = exec(`dns-sd -L "${rawName}" _uscan._tcp local.`);
-          resChild.stdout.on('data', (resData) => {
-            const portMatch = resData.toString().match(/can be reached at ([^:]+):([0-9]+)/);
-            if (portMatch && !resolved) {
-              resolved = true;
-              clearTimeout(timer);
+        child.stdout.on('data', (data) => {
+          const match = data.toString().match(/_uscan\._tcp\.\s+(.+)$/m);
+          if (match && !resolved) {
+            const rawName = match[1].trim();
+            try { child.kill(); } catch (e) {}
+
+            const resChild = exec(`dns-sd -L "${rawName}" _uscan._tcp local.`);
+            resChild.stdout.on('data', (resData) => {
+              const portMatch = resData.toString().match(/can be reached at ([^:]+):([0-9]+)/);
+              if (portMatch && !resolved) {
+                resolved = true;
+                clearTimeout(timer);
+                try { resChild.kill(); } catch (e) {}
+                const host = portMatch[1].replace(/\.$/, '') === 'localhost' ? '127.0.0.1' : portMatch[1].replace(/\.$/, '');
+                const port = parseInt(portMatch[2]);
+                resolve({ name: rawName, type: 'escl', host, port });
+              }
+            });
+
+            setTimeout(() => {
               try { resChild.kill(); } catch (e) {}
-              const host = portMatch[1].replace(/\.$/, '') === 'localhost' ? '127.0.0.1' : portMatch[1].replace(/\.$/, '');
-              const port = parseInt(portMatch[2]);
-              cachedScanner = { name: rawName, type: 'escl', host, port, lastChecked: Date.now() };
-              resolve(cachedScanner);
-            }
-          });
+              if (!resolved) resolve(null);
+            }, 1000);
+          }
+        });
 
-          setTimeout(() => {
-            try { resChild.kill(); } catch (e) {}
-            if (!resolved) resolve(cachedScanner);
-          }, 1500);
-        }
-      });
+        child.on('error', () => {
+          clearTimeout(timer);
+          resolve(null);
+        });
+      } catch (e) {
+        resolve(null);
+      }
+    });
 
-      child.on('error', () => {
-        clearTimeout(timer);
-        resolve(cachedScanner);
-      });
-    } catch (e) {
-      resolve(cachedScanner);
+    if (mdnsResult) {
+      candidateTargets.unshift(mdnsResult);
     }
-  });
+  }
+
+  // Probe all candidates in parallel with quick timeout
+  const probePromises = candidateTargets.map(t => probeScannerEndpoint(t.host, t.port));
+  const probeResults = await Promise.all(probePromises);
+
+  const activeResult = probeResults.find(r => r.reachable);
+  if (activeResult) {
+    cachedScanner = {
+      name: activeResult.name,
+      type: 'escl',
+      host: activeResult.host,
+      port: activeResult.port,
+      isOnline: true,
+      status: 'Ready (Connected)'
+    };
+    return cachedScanner;
+  }
+
+  // No physical scanner reachable
+  cachedScanner = {
+    name: 'Physical Printer (HP Laser MFP 135w)',
+    type: 'escl',
+    host: customScannerConfig.host || 'host.docker.internal',
+    port: customScannerConfig.port || 8080,
+    isOnline: false,
+    status: 'Offline / Disconnected',
+    note: 'Printer is not reachable on host/network. Check power, Wi-Fi IP, or USB connection.'
+  };
+
+  return null;
 }
 
 /**
@@ -489,20 +581,32 @@ async function triggerMockScan(targetFolderId = null, templateIndex = null) {
 }
 
 /**
- * Check for connected physical scanners on macOS
+ * Check for connected physical scanners with live active status
  */
 async function detectSystemScanners() {
   const discovered = await discoverPhysicalScanners();
   const devices = [];
 
-  if (discovered) {
+  if (discovered && discovered.isOnline) {
     devices.push({
       id: 'physical_printer',
-      name: discovered.name || 'HP Laser MFP 135w',
-      type: 'AirScan / eSCL',
+      name: discovered.name,
+      type: discovered.type === 'wia' ? 'Windows WIA' : 'AirScan / eSCL',
       host: discovered.host,
       port: discovered.port,
+      is_online: true,
       status: 'Ready (Connected)'
+    });
+  } else {
+    devices.push({
+      id: 'physical_printer',
+      name: customScannerConfig.name || 'Physical Printer / Scanner',
+      type: 'AirScan / eSCL',
+      host: customScannerConfig.host || 'host.docker.internal',
+      port: customScannerConfig.port || 8080,
+      is_online: false,
+      status: 'Offline / Not Connected',
+      note: 'No printer answered the active network probe.'
     });
   }
 
@@ -510,11 +614,25 @@ async function detectSystemScanners() {
     id: 'mock_scanner',
     name: 'Test Scanner Simulator',
     type: 'simulator',
+    is_online: true,
     status: 'Ready'
   });
 
   return devices;
 }
+
+module.exports = {
+  detectSystemScanners,
+  discoverPhysicalScanners,
+  probeScannerEndpoint,
+  setCustomScannerEndpoint,
+  getCustomScannerConfig,
+  handleScanTrigger,
+  triggerMockScan,
+  performRealPhysicalScan,
+  processUploadedScan,
+  SAMPLE_TEMPLATES
+};
 
 /**
  * Handle scan trigger (Routes to real printer on Windows/macOS or simulator)

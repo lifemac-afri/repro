@@ -7,7 +7,13 @@ import {
   Folder, 
   AlertCircle, 
   Loader2, 
-  Zap
+  Zap,
+  Settings,
+  RefreshCw,
+  CheckCircle2,
+  Wifi,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react';
 import { api } from '../services/api';
 
@@ -28,6 +34,13 @@ export default function ScannerModal({
   const [scanners, setScanners] = useState([]);
   const [selectedScannerId, setSelectedScannerId] = useState('physical_printer');
   
+  // Custom IP Configuration state
+  const [showConfig, setShowConfig] = useState(false);
+  const [customHost, setCustomHost] = useState('');
+  const [customPort, setCustomPort] = useState('8080');
+  const [isProbing, setIsProbing] = useState(false);
+  const [probeResult, setProbeResult] = useState(null);
+  
   // Camera state
   const videoRef = useRef(null);
   const [cameraActive, setCameraActive] = useState(false);
@@ -43,6 +56,7 @@ export default function ScannerModal({
       setReceiptName('');
       setError(null);
       setIsScanning(false);
+      setProbeResult(null);
       loadScanners();
     } else {
       stopCamera();
@@ -65,11 +79,59 @@ export default function ScannerModal({
       const physical = list.find(s => s.id === 'physical_printer');
       if (physical) {
         setSelectedScannerId('physical_printer');
+        if (physical.host && !customHost) {
+          setCustomHost(physical.host);
+        }
+        if (physical.port && (!customPort || customPort === '8080')) {
+          setCustomPort(String(physical.port));
+        }
       } else if (list.length > 0) {
         setSelectedScannerId(list[0].id);
       }
     } catch (e) {
       console.warn('Scanner listing error:', e);
+    }
+  };
+
+  const handleTestProbe = async () => {
+    if (!customHost.trim()) {
+      setProbeResult({ success: false, message: 'Please enter a valid IP or hostname' });
+      return;
+    }
+    try {
+      setIsProbing(true);
+      setProbeResult(null);
+      const res = await api.probeScanner(customHost.trim(), parseInt(customPort) || 8080);
+      if (res.reachable) {
+        setProbeResult({ success: true, message: `✓ Connected! Found: ${res.name}` });
+      } else {
+        setProbeResult({ success: false, message: `✗ Not reachable: ${res.error || 'Connection failed'}` });
+      }
+    } catch (err) {
+      setProbeResult({ success: false, message: `✗ Probe failed: ${err.message}` });
+    } finally {
+      setIsProbing(false);
+    }
+  };
+
+  const handleSaveScannerConfig = async () => {
+    if (!customHost.trim()) return;
+    try {
+      setIsProbing(true);
+      const res = await api.setTargetScanner({
+        host: customHost.trim(),
+        port: parseInt(customPort) || 8080
+      });
+      await loadScanners();
+      if (res.probe && res.probe.reachable) {
+        setProbeResult({ success: true, message: `✓ Saved & Connected to ${res.probe.name}` });
+      } else {
+        setProbeResult({ success: false, message: `Saved target, but scanner is currently not responding` });
+      }
+    } catch (err) {
+      setProbeResult({ success: false, message: `Save error: ${err.message}` });
+    } finally {
+      setIsProbing(false);
     }
   };
 
@@ -98,43 +160,64 @@ export default function ScannerModal({
     setCameraActive(false);
   };
 
-  // Perform Scan via Simulator or Hardware Printer
-  const handleTriggerScan = async () => {
+  // Handle Scan Execution
+  const handleStartScan = async () => {
     try {
       setIsScanning(true);
       setError(null);
-      setScanStep(sourceMode === 'printer' ? 'Connecting to printer scanner & initiating scan...' : 'Generating simulated scan...');
-      
-      const newReceipt = await api.triggerScan({
-        target_folder_id: targetFolderId === 'unsorted' ? null : targetFolderId,
-        source: sourceMode === 'printer' ? 'printer' : 'simulator',
-        template_index: selectedTemplateIndex
-      });
+      setScanStep('Connecting to scanner...');
 
-      if (receiptName.trim()) {
-        await api.updateReceipt(newReceipt.id, { title: receiptName.trim() });
-        newReceipt.title = receiptName.trim();
+      if (sourceMode === 'printer') {
+        const physical = scanners.find(s => s.id === 'physical_printer');
+        if (physical && physical.is_online === false && !showConfig) {
+          setShowConfig(true);
+        }
+        setScanStep('Scanning physical document from flatbed...');
+        const newReceipt = await api.triggerScan({
+          target_folder_id: targetFolderId === 'unsorted' ? null : targetFolderId,
+          source: 'printer'
+        });
+
+        if (receiptName.trim()) {
+          await api.updateReceipt(newReceipt.id, { title: receiptName.trim() });
+          newReceipt.title = receiptName.trim();
+        }
+
+        setIsScanning(false);
+        onScanSuccess(newReceipt);
+        onClose();
+
+      } else if (sourceMode === 'simulator') {
+        setScanStep('Generating high-res scan...');
+        const newReceipt = await api.triggerScan({
+          target_folder_id: targetFolderId === 'unsorted' ? null : targetFolderId,
+          source: 'simulator',
+          template_index: selectedTemplateIndex
+        });
+
+        if (receiptName.trim()) {
+          await api.updateReceipt(newReceipt.id, { title: receiptName.trim() });
+          newReceipt.title = receiptName.trim();
+        }
+
+        setIsScanning(false);
+        onScanSuccess(newReceipt);
+        onClose();
+
+      } else if (sourceMode === 'camera') {
+        await captureCameraPhoto();
       }
-
-      setScanStep('Receipt saved successfully.');
-      await new Promise(r => setTimeout(r, 400));
-      setIsScanning(false);
-      onScanSuccess(newReceipt);
-      onClose();
     } catch (err) {
       console.error('Scan error:', err);
-      setError(err.message || 'Failed to complete scan');
+      setError(err.message || 'Failed to trigger scan');
       setIsScanning(false);
     }
   };
 
   // Handle Camera Capture
-  const handleCaptureCamera = async () => {
+  const captureCameraPhoto = async () => {
     if (!videoRef.current) return;
     try {
-      setIsScanning(true);
-      setScanStep('Capturing document frame...');
-
       const canvas = document.createElement('canvas');
       canvas.width = videoRef.current.videoWidth || 1280;
       canvas.height = videoRef.current.videoHeight || 720;
@@ -194,6 +277,9 @@ export default function ScannerModal({
   };
 
   if (!isOpen) return null;
+
+  const physicalDevice = scanners.find(s => s.id === 'physical_printer');
+  const isPhysicalOnline = physicalDevice?.is_online;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm animate-fade-in">
@@ -271,19 +357,6 @@ export default function ScannerModal({
             <div className="grid grid-cols-4 gap-2">
               <button
                 type="button"
-                onClick={() => setSourceMode('simulator')}
-                className={`flex flex-col items-center gap-1 p-2.5 rounded-lg border text-center transition-all ${
-                  sourceMode === 'simulator'
-                    ? 'bg-slate-900 border-slate-900 text-white'
-                    : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
-                }`}
-              >
-                <Zap className="w-4 h-4" />
-                <span className="text-xs font-semibold">Simulator</span>
-              </button>
-
-              <button
-                type="button"
                 onClick={() => setSourceMode('printer')}
                 className={`flex flex-col items-center gap-1 p-2.5 rounded-lg border text-center transition-all ${
                   sourceMode === 'printer'
@@ -293,6 +366,19 @@ export default function ScannerModal({
               >
                 <Printer className="w-4 h-4" />
                 <span className="text-xs font-semibold">Printer</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setSourceMode('simulator')}
+                className={`flex flex-col items-center gap-1 p-2.5 rounded-lg border text-center transition-all ${
+                  sourceMode === 'simulator'
+                    ? 'bg-slate-900 border-slate-900 text-white'
+                    : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                }`}
+              >
+                <Zap className="w-4 h-4" />
+                <span className="text-xs font-semibold">Simulator</span>
               </button>
 
               <button
@@ -323,7 +409,106 @@ export default function ScannerModal({
             </div>
           </div>
 
-          {/* Mode 1: Simulator */}
+          {/* Mode 1: Hardware Printer */}
+          {sourceMode === 'printer' && (
+            <div className="space-y-3 p-3.5 rounded-lg bg-slate-50 border border-slate-200">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-slate-800">Physical Scanner Status</span>
+                <button
+                  type="button"
+                  onClick={loadScanners}
+                  className="flex items-center gap-1 text-[11px] text-slate-500 hover:text-slate-800 font-medium"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  <span>Re-scan</span>
+                </button>
+              </div>
+
+              {/* Status Badge */}
+              <div className="flex items-center justify-between p-2.5 rounded-lg bg-white border border-slate-200">
+                <div className="flex items-center gap-2">
+                  <span className={`w-2.5 h-2.5 rounded-full ${isPhysicalOnline ? 'bg-emerald-500 animate-pulse' : 'bg-rose-400'}`} />
+                  <div>
+                    <div className="text-xs font-semibold text-slate-900">
+                      {physicalDevice?.name || 'HP Laser MFP 135w'}
+                    </div>
+                    <div className="text-[11px] text-slate-500">
+                      {isPhysicalOnline ? `Online (${physicalDevice.host}:${physicalDevice.port})` : 'Offline / Not responding on default ports'}
+                    </div>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setShowConfig(!showConfig)}
+                  className="flex items-center gap-1 px-2.5 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-medium transition-colors"
+                >
+                  <Settings className="w-3 h-3" />
+                  <span>{showConfig ? 'Hide IP' : 'Set IP'}</span>
+                  {showConfig ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                </button>
+              </div>
+
+              {/* Expandable IP Configuration Card */}
+              {showConfig && (
+                <div className="p-3 space-y-2.5 rounded-lg bg-white border border-slate-200 text-xs animate-fade-in">
+                  <div className="text-[11px] font-semibold text-slate-700">
+                    Connect via Wi-Fi IP Address (e.g. from printer display or router)
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-2">
+                    <div className="col-span-2">
+                      <label className="block text-[10px] font-medium text-slate-500 mb-0.5">Printer IP / Host</label>
+                      <input
+                        type="text"
+                        value={customHost}
+                        onChange={(e) => setCustomHost(e.target.value)}
+                        placeholder="e.g. 192.168.1.150 or host.docker.internal"
+                        className="w-full px-2.5 py-1.5 rounded border border-slate-300 text-xs font-mono"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-medium text-slate-500 mb-0.5">eSCL Port</label>
+                      <input
+                        type="text"
+                        value={customPort}
+                        onChange={(e) => setCustomPort(e.target.value)}
+                        placeholder="8080"
+                        className="w-full px-2.5 py-1.5 rounded border border-slate-300 text-xs font-mono"
+                      />
+                    </div>
+                  </div>
+
+                  {probeResult && (
+                    <div className={`p-2 rounded text-[11px] font-medium ${probeResult.success ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' : 'bg-rose-50 text-rose-800 border border-rose-200'}`}>
+                      {probeResult.message}
+                    </div>
+                  )}
+
+                  <div className="flex items-center gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={handleTestProbe}
+                      disabled={isProbing || !customHost}
+                      className="px-2.5 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-800 font-medium text-[11px] disabled:opacity-50"
+                    >
+                      {isProbing ? 'Testing...' : 'Test Connection'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSaveScannerConfig}
+                      disabled={isProbing || !customHost}
+                      className="px-2.5 py-1 rounded bg-slate-900 hover:bg-slate-800 text-white font-medium text-[11px] disabled:opacity-50"
+                    >
+                      Save Target IP
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Mode 2: Simulator */}
           {sourceMode === 'simulator' && (
             <div className="space-y-2 p-3 rounded-lg bg-slate-50 border border-slate-200">
               <span className="text-xs font-semibold text-slate-700">Select Test Receipt:</span>
@@ -348,36 +533,6 @@ export default function ScannerModal({
                   >
                     {name}
                   </button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Mode 2: Hardware Printer */}
-          {sourceMode === 'printer' && (
-            <div className="space-y-2 p-3 rounded-lg bg-slate-50 border border-slate-200">
-              <span className="text-xs font-semibold text-slate-700">Select Scanner Device:</span>
-              <div className="space-y-1.5">
-                {scanners.map(s => (
-                  <label
-                    key={s.id}
-                    className={`flex items-center justify-between p-2.5 rounded-md border cursor-pointer transition-all ${
-                      selectedScannerId === s.id
-                        ? 'bg-white border-slate-900 text-slate-900 font-medium'
-                        : 'bg-white border-slate-200 text-slate-600'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2.5">
-                      <input
-                        type="radio"
-                        name="scanner-device"
-                        checked={selectedScannerId === s.id}
-                        onChange={() => setSelectedScannerId(s.id)}
-                        className="text-slate-900 focus:ring-0"
-                      />
-                      <span className="text-xs">{s.name}</span>
-                    </div>
-                  </label>
                 ))}
               </div>
             </div>
@@ -409,17 +564,19 @@ export default function ScannerModal({
                 onChange={(e) => e.target.files && handleFileUpload(e.target.files)}
               />
               <UploadCloud className="w-8 h-8 text-slate-400 mb-2" />
-              <p className="text-xs font-semibold text-slate-700">
-                Click or drag receipt files here
+              <p className="text-xs font-semibold text-slate-800">
+                Click or drag receipts here to upload
               </p>
-              <p className="text-[11px] text-slate-400 mt-0.5">JPG, PNG, PDF</p>
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                Supports JPEG, PNG, WebP, and PDF files
+              </p>
             </div>
           )}
 
-          {/* Mode 4: Live Camera */}
+          {/* Mode 4: Camera Capture */}
           {sourceMode === 'camera' && (
-            <div className="space-y-2">
-              <div className="relative aspect-video rounded-lg bg-black overflow-hidden border border-slate-200">
+            <div className="space-y-3">
+              <div className="relative rounded-lg overflow-hidden bg-black aspect-4/3 flex items-center justify-center border border-slate-200">
                 <video
                   ref={videoRef}
                   autoPlay
@@ -427,57 +584,55 @@ export default function ScannerModal({
                   muted
                   className="w-full h-full object-cover"
                 />
+                {!cameraActive && (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-900/80 text-white gap-2 p-4 text-center">
+                    <Camera className="w-6 h-6 text-slate-400" />
+                    <span className="text-xs">Requesting camera permissions...</span>
+                  </div>
+                )}
               </div>
-              <button
-                type="button"
-                onClick={handleCaptureCamera}
-                disabled={isScanning || !cameraActive}
-                className="w-full py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-semibold text-xs flex items-center justify-center gap-2 shadow-sm transition-all"
-              >
-                <Camera className="w-4 h-4" />
-                <span>Snap Receipt</span>
-              </button>
-            </div>
-          )}
-
-          {/* Scanning Progress */}
-          {isScanning && (
-            <div className="p-3 rounded-lg bg-slate-100 border border-slate-200 flex items-center gap-3">
-              <Loader2 className="w-4 h-4 text-slate-700 animate-spin shrink-0" />
-              <span className="text-xs font-medium text-slate-700">{scanStep}</span>
             </div>
           )}
 
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-between px-5 py-3.5 border-t border-slate-200 bg-white">
+        <div className="flex items-center justify-between px-5 py-4 border-t border-slate-200 bg-slate-50">
           <button
             type="button"
             onClick={onClose}
             disabled={isScanning}
-            className="px-3.5 py-2 rounded-lg text-xs font-semibold text-slate-600 hover:bg-slate-100 transition-all disabled:opacity-50"
+            className="px-4 py-2 rounded-lg bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 text-xs font-semibold transition-all disabled:opacity-50"
           >
             Cancel
           </button>
 
-          {(sourceMode === 'simulator' || sourceMode === 'printer') && (
+          {sourceMode !== 'upload' && (
             <button
-              id="btn-confirm-scan"
+              id="btn-start-scan"
               type="button"
-              onClick={handleTriggerScan}
+              onClick={handleStartScan}
               disabled={isScanning}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-semibold text-xs shadow-sm transition-all disabled:opacity-50"
+              className="flex items-center gap-2 px-5 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold shadow-sm transition-all active:scale-95 disabled:opacity-50"
             >
               {isScanning ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>Scanning...</span>
+                  <span>{scanStep || 'Processing...'}</span>
                 </>
               ) : (
                 <>
-                  <Printer className="w-4 h-4" />
-                  <span>Start Scan</span>
+                  {sourceMode === 'camera' ? (
+                    <>
+                      <Camera className="w-4 h-4" />
+                      <span>Snap & File Receipt</span>
+                    </>
+                  ) : (
+                    <>
+                      <Printer className="w-4 h-4" />
+                      <span>Start Scan</span>
+                    </>
+                  )}
                 </>
               )}
             </button>
