@@ -10,6 +10,10 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3000
+      - SCANNER_HOST=${SCANNER_HOST:-host.docker.internal}
+      - SCANNER_PORT=${SCANNER_PORT:-56200}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - repro_data:/app/server/data
     healthcheck:

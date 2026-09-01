@@ -144,8 +144,16 @@ function discoverPhysicalScanners() {
  * Perform a physical scan from real eSCL / AirScan printer scanner
  */
 async function performRealPhysicalScan(scannerInfo, targetFolderId = null) {
-  const host = scannerInfo?.host || cachedScanner.host || '127.0.0.1';
-  const port = scannerInfo?.port || cachedScanner.port || 56200;
+  const candidateHosts = Array.from(new Set([
+    process.env.SCANNER_HOST,
+    process.env.PRINTER_IP,
+    'host.docker.internal',
+    scannerInfo?.host,
+    cachedScanner.host,
+    '127.0.0.1'
+  ].filter(Boolean)));
+
+  const port = parseInt(process.env.SCANNER_PORT) || scannerInfo?.port || cachedScanner.port || 56200;
 
   const xmlPayload = `<?xml version="1.0" encoding="UTF-8"?>
 <scan:ScanSettings xmlns:scan="http://schemas.hp.com/imaging/escl/2011/05/03" xmlns:pwg="http://www.pwg.org/schemas/2010/12/sm">
@@ -165,31 +173,53 @@ async function performRealPhysicalScan(scannerInfo, targetFolderId = null) {
   <pwg:DocumentFormat>image/jpeg</pwg:DocumentFormat>
 </scan:ScanSettings>`;
 
-  // 1. Create Scan Job
-  const jobLocation = await new Promise((resolve, reject) => {
-    const req = http.request({
-      hostname: host,
-      port: port,
-      path: '/eSCL/ScanJobs',
-      method: 'POST',
-      headers: {
-        'Content-Type': 'text/xml',
-        'Content-Length': Buffer.byteLength(xmlPayload)
-      },
-      timeout: 10000
-    }, (res) => {
-      if (res.statusCode === 201 && res.headers.location) {
-        resolve(res.headers.location);
-      } else {
-        reject(new Error(`Printer returned HTTP ${res.statusCode} when creating scan job`));
-      }
-    });
+  // 1. Create Scan Job by probing candidate hosts (supports Docker, host bridge, & LAN)
+  let activeHost = candidateHosts[0];
+  let jobLocation = null;
+  let lastError = null;
 
-    req.on('error', (err) => reject(err));
-    req.on('timeout', () => { req.destroy(); reject(new Error('Printer connection timed out')); });
-    req.write(xmlPayload);
-    req.end();
-  });
+  for (const host of candidateHosts) {
+    try {
+      jobLocation = await new Promise((resolve, reject) => {
+        const req = http.request({
+          hostname: host,
+          port: port,
+          path: '/eSCL/ScanJobs',
+          method: 'POST',
+          headers: {
+            'Content-Type': 'text/xml',
+            'Content-Length': Buffer.byteLength(xmlPayload)
+          },
+          timeout: 4000
+        }, (res) => {
+          if (res.statusCode === 201 && res.headers.location) {
+            resolve(res.headers.location);
+          } else {
+            reject(new Error(`Printer on ${host}:${port} returned HTTP ${res.statusCode}`));
+          }
+        });
+
+        req.on('error', reject);
+        req.on('timeout', () => { req.destroy(); reject(new Error(`Timeout connecting to ${host}:${port}`)); });
+        req.write(xmlPayload);
+        req.end();
+      });
+
+      if (jobLocation) {
+        activeHost = host;
+        console.log(`✓ Connected to scanner on active host: ${activeHost}:${port}`);
+        break;
+      }
+    } catch (err) {
+      lastError = err;
+    }
+  }
+
+  if (!jobLocation) {
+    throw new Error(`Could not connect to printer scanner on any host (${candidateHosts.join(', ')}:${port}). ${lastError ? lastError.message : ''}`);
+  }
+
+  const host = activeHost;
 
   // Extract relative job path
   let jobPath = jobLocation;
