@@ -4,7 +4,7 @@
   "description": "Office Receipt Scanner and Processing Management System",
   "main": "server/index.js",
   "scripts": {
-    "start": "node server/index.js",
+    "start": "node -e \"const fs=require('fs'); if(!fs.existsSync('dist/index.html')) { console.log('⚡ Building frontend bundle...'); require('child_process').execSync('npm run build', {stdio:'inherit'}); }\" && node server/index.js",
     "dev": "concurrently -n \"SERVER,CLIENT\" -c \"cyan,magenta\" \"npm run server\" \"npm run client\"",
     "server": "cross-env PORT=3001 node server/index.js",
     "client": "vite",

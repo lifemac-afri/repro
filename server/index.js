@@ -428,13 +428,36 @@ app.get('/health', (req, res) => {
 
 // Production Frontend Static File Serving
 const distDir = path.join(__dirname, '../dist');
-if (fs.existsSync(distDir)) {
+if (fs.existsSync(distDir) && fs.existsSync(path.join(distDir, 'index.html'))) {
   app.use(express.static(distDir));
   app.get('*', (req, res, next) => {
     if (req.path.startsWith('/api') || req.path.startsWith('/uploads') || req.path.startsWith('/health')) {
       return next();
     }
     res.sendFile(path.join(distDir, 'index.html'));
+  });
+} else {
+  // If dist/ was not built yet, display a helpful guide on GET /
+  app.get('/', (req, res) => {
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+        <head><title>RePro - Setup Required</title><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: #f8fafc; color: #1e293b;">
+          <div style="max-width: 500px; padding: 32px; background: white; border-radius: 12px; border: 1px solid #e2e8f0; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); text-align: center;">
+            <h2 style="margin-top: 0; color: #0f172a;">⚡ RePro Server is Running</h2>
+            <p style="color: #64748b; font-size: 14px;">The frontend assets (<code>dist/</code>) have not been compiled yet.</p>
+            <div style="background: #f1f5f9; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 13px; text-align: left; margin: 20px 0; color: #0f172a;">
+              <div># Build frontend bundle:</div>
+              <div style="font-weight: bold; margin-top: 4px; color: #4338ca;">npm run build</div>
+              <div style="margin-top: 12px;"># Or run in development mode:</div>
+              <div style="font-weight: bold; margin-top: 4px; color: #4338ca;">npm run dev</div>
+            </div>
+            <p style="color: #94a3b8; font-size: 12px; margin-bottom: 0;">Product of LIFEMAC Africa</p>
+          </div>
+        </body>
+      </html>
+    `);
   });
 }
 
